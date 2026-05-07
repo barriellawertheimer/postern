@@ -1,5 +1,6 @@
 # Build output
 dist/
+admin-ui/dist/
 *.tsbuildinfo
 
 # Dependencies

@@ -1,0 +1,50 @@
+/* Tweaks layered on top of PicoCSS classless. */
+
+:root {
+  --pico-form-element-spacing-vertical: 0.5rem;
+}
+
+main.container {
+  padding-block: 1rem 4rem;
+}
+
+nav.app-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+nav.app-nav a {
+  margin-inline-end: 1rem;
+}
+
+nav.app-nav a.active {
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 1rem;
+  font-size: 0.85em;
+}
+
+.status-pill.active {
+  background: var(--pico-color-green-100, #d4edda);
+  color: var(--pico-color-green-700, #155724);
+}
+
+.status-pill.blocked {
+  background: var(--pico-color-red-100, #f8d7da);
+  color: var(--pico-color-red-700, #721c24);
+}
+
+.error {
+  color: var(--pico-color-red-600, #b71c1c);
+  margin-block: 0.5rem;
+}
+
+table {
+  font-size: 0.95em;
+}

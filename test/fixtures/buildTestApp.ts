@@ -1,22 +1,38 @@
 // Helper that builds a `BuiltApp` against in-memory SQLite + fake SL/SMTP.
 // Tests import this rather than wiring up `buildApp` themselves each time.
 
+import { randomBytes } from "node:crypto";
 import { buildApp, type BuiltApp } from "../../src/server.js";
 import type { Config } from "../../src/config.js";
 import { FakeSimpleLogin } from "./fakeSimpleLogin.js";
 import { FakeMailer } from "./fakeMailer.js";
 import { TurnstileVerifier } from "../../src/services/turnstile.js";
 import { makeTestKeys } from "./testKeys.js";
+import { hashPasswordForSetup } from "../../src/admin/auth.js";
 
 export interface TestContext {
   built: BuiltApp;
   sl: FakeSimpleLogin;
   mailer: FakeMailer;
+  adminPassword?: string;
 }
 
-export async function buildTestApp(overrides: Partial<Config["env"]> = {}): Promise<TestContext> {
+export interface TestAppOptions {
+  /** Enable the admin sub-tree with a known password. */
+  admin?: { password?: string; staticRoot?: string };
+}
+
+export async function buildTestApp(
+  overrides: Partial<Config["env"]> = {},
+  opts: TestAppOptions = {},
+): Promise<TestContext> {
   const sl = new FakeSimpleLogin();
   const mailer = new FakeMailer();
+
+  const adminEnabled = opts.admin !== undefined;
+  const adminPassword = opts.admin?.password ?? "test-admin-password";
+  const adminPasswordHash = adminEnabled ? hashPasswordForSetup(adminPassword) : null;
+  const adminSessionSecret = adminEnabled ? randomBytes(32) : null;
 
   const config: Config = {
     env: {
@@ -44,6 +60,11 @@ export async function buildTestApp(overrides: Partial<Config["env"]> = {}): Prom
       ALIAS_SUFFIX_LENGTH: 5,
       ALIAS_SEPARATOR: ".",
       ALLOWED_ORIGINS: "",
+      ADMIN_ENABLED: adminEnabled,
+      ADMIN_PASSWORD_HASH: adminPasswordHash ?? undefined,
+      ADMIN_SESSION_SECRET: adminEnabled ? adminSessionSecret!.toString("hex") : undefined,
+      ADMIN_SESSION_TTL_HOURS: 12,
+      ADMIN_COOKIE_SECURE: false,
       ...overrides,
     } as Config["env"],
     isProd: false,
@@ -51,6 +72,11 @@ export async function buildTestApp(overrides: Partial<Config["env"]> = {}): Prom
     keys: makeTestKeys(),
     ownerEmail: "owner@protonmail.example",
     allowedOrigins: [],
+    adminEnabled,
+    adminPasswordHash,
+    adminSessionSecret,
+    adminSessionTtlMs: 12 * 60 * 60 * 1000,
+    adminCookieSecure: false,
   };
 
   const turnstile = new TurnstileVerifier({
@@ -66,8 +92,9 @@ export async function buildTestApp(overrides: Partial<Config["env"]> = {}): Prom
       sl: sl as unknown as import("../../src/services/simplelogin.js").SimpleLoginClient,
       turnstile,
       dbPath: ":memory:",
+      ...(opts.admin?.staticRoot !== undefined ? { adminStaticRoot: opts.admin.staticRoot } : {}),
     },
   });
 
-  return { built, sl, mailer };
+  return { built, sl, mailer, adminPassword: adminEnabled ? adminPassword : undefined };
 }

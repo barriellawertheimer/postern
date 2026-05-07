@@ -86,6 +86,18 @@ export async function registerContactRoute(
       }
     }
 
+    // Reject blocked visitors *before* mint so we don't burn an SL alias on
+    // a known-bad sender. Silent 202 (no info leak) — operator sees the
+    // rejection in audit_log.
+    const existing = repo.getVisitorByEmail(body.email);
+    if (existing && existing.status === "blocked") {
+      repo.audit("blocked_submission_rejected", {
+        visitorId: existing.id,
+        detail: `ip=${request.ip}`,
+      });
+      return reply.code(202).send({ status: "queued" });
+    }
+
     // Mint (or reuse) the alias *before* the circuit breaker check, so a
     // broken-mailbox day doesn't lose the visitor's identity. SL state is
     // cheap to maintain even when SMTP is paused.

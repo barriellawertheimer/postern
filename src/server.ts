@@ -20,6 +20,7 @@ import { normalizeFormat } from "./lib/format.js";
 import { registerRateLimit } from "./middleware/rateLimit.js";
 import { registerContactRoute } from "./routes/contact.js";
 import { registerHealthRoute } from "./routes/health.js";
+import { registerAdmin } from "./admin/index.js";
 
 export interface BuildOptions {
   config?: Config;
@@ -29,6 +30,8 @@ export interface BuildOptions {
     sl: SimpleLoginClient;
     turnstile: TurnstileVerifier;
     dbPath: string;
+    /** Override the admin SPA bundle directory. */
+    adminStaticRoot: string;
   }>;
 }
 
@@ -45,8 +48,22 @@ export async function buildApp(opts: BuildOptions = {}): Promise<BuiltApp> {
   const { db, applied } = openDatabase(dbPath);
   const repo = new Repo(db, config.keys);
 
-  const loggerOpts: { level: string; transport?: { target: string; options: Record<string, unknown> } } = {
+  const loggerOpts: {
+    level: string;
+    redact: { paths: string[]; censor: string };
+    transport?: { target: string; options: Record<string, unknown> };
+  } = {
     level: config.env.LOG_LEVEL,
+    redact: {
+      paths: [
+        "env.ADMIN_PASSWORD_HASH",
+        "env.ADMIN_SESSION_SECRET",
+        "env.SL_API_KEY",
+        "env.SMTP_PASS",
+        "env.TURNSTILE_SECRET",
+      ],
+      censor: "[REDACTED]",
+    },
   };
   // pino-pretty is dev-only; not installed in production. We don't ship it.
   // If you want pretty logs locally, `npm i -D pino-pretty`.
@@ -96,6 +113,9 @@ export async function buildApp(opts: BuildOptions = {}): Promise<BuiltApp> {
 
   if (config.allowedOrigins.length > 0) {
     app.addHook("onSend", async (req, reply) => {
+      // Scope to /contact only. Without this, a misconfigured ALLOWED_ORIGINS
+      // would also grant CORS on /admin/* and undermine its same-origin posture.
+      if (req.routeOptions?.url !== "/contact") return;
       const origin = req.headers.origin;
       if (origin && config.allowedOrigins.includes(origin)) {
         reply.header("access-control-allow-origin", origin);
@@ -117,6 +137,20 @@ export async function buildApp(opts: BuildOptions = {}): Promise<BuiltApp> {
 
   await registerHealthRoute(app);
   await registerContactRoute(app, { config, repo, aliasMint, mailer, turnstile });
+
+  if (config.adminEnabled) {
+    const breakerThreshold = Math.floor(
+      config.env.PROTON_DAILY_CAP * config.env.CIRCUIT_BREAKER_PCT,
+    );
+    await registerAdmin(app, {
+      config,
+      repo,
+      breakerThreshold,
+      ...(opts.overrides?.adminStaticRoot !== undefined
+        ? { staticRoot: opts.overrides.adminStaticRoot }
+        : {}),
+    });
+  }
 
   const shutdown = async (): Promise<void> => {
     try { await app.close(); } catch (err) { app.log.warn({ err }, "fastify close failed"); }

@@ -92,6 +92,19 @@ const EnvSchema = z.object({
 
   // CORS — allowed origins for the contact form. Comma-separated. Empty = same-origin only.
   ALLOWED_ORIGINS: z.string().default(""),
+
+  // Admin UI (mounted at /admin). Disabled by default; existing deployments boot unchanged.
+  ADMIN_ENABLED: z
+    .string()
+    .default("false")
+    .transform((s) => s.trim().toLowerCase() === "true"),
+  ADMIN_PASSWORD_HASH: z.string().optional(),
+  ADMIN_SESSION_SECRET: z.string().optional(),
+  ADMIN_SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(12),
+  ADMIN_COOKIE_SECURE: z
+    .string()
+    .optional()
+    .transform((s) => (s === undefined ? undefined : s.trim().toLowerCase() === "true")),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -103,6 +116,12 @@ export interface Config {
   keys: CryptoKeys;
   ownerEmail: string;
   allowedOrigins: string[];
+  adminEnabled: boolean;
+  /** Present iff adminEnabled. */
+  adminPasswordHash: string | null;
+  adminSessionSecret: Buffer | null;
+  adminSessionTtlMs: number;
+  adminCookieSecure: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -132,12 +151,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const isProd = parsed.NODE_ENV === "production";
+  let adminPasswordHash: string | null = null;
+  let adminSessionSecret: Buffer | null = null;
+  if (parsed.ADMIN_ENABLED) {
+    if (!parsed.ADMIN_PASSWORD_HASH || !parsed.ADMIN_SESSION_SECRET) {
+      throw new Error(
+        "ADMIN_ENABLED=true requires ADMIN_PASSWORD_HASH and ADMIN_SESSION_SECRET",
+      );
+    }
+    adminPasswordHash = parsed.ADMIN_PASSWORD_HASH;
+    adminSessionSecret = decodeKey(parsed.ADMIN_SESSION_SECRET, "ADMIN_SESSION_SECRET");
+    if (adminSessionSecret.equals(encKey) || adminSessionSecret.equals(lookupKey)) {
+      throw new Error("ADMIN_SESSION_SECRET must be independent of ENC_KEY/LOOKUP_KEY");
+    }
+  }
+
   return {
     env: parsed,
-    isProd: parsed.NODE_ENV === "production",
+    isProd,
     isTest: parsed.NODE_ENV === "test",
     keys: { encKey, lookupKey },
     ownerEmail: parsed.OWNER_EMAIL ?? parsed.SMTP_USER,
     allowedOrigins,
+    adminEnabled: parsed.ADMIN_ENABLED,
+    adminPasswordHash,
+    adminSessionSecret,
+    adminSessionTtlMs: parsed.ADMIN_SESSION_TTL_HOURS * 60 * 60 * 1000,
+    adminCookieSecure: parsed.ADMIN_COOKIE_SECURE ?? isProd,
   };
 }
