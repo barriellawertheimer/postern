@@ -37,6 +37,46 @@ export interface SubmissionInsert {
   uaHash?: Buffer | null;
 }
 
+export type VisitorStatus = "active" | "blocked";
+
+export interface SubmissionRow {
+  id: number;
+  visitorId: number;
+  message: string;
+  ipHashHex: string | null;
+  uaHashHex: string | null;
+  createdAt: number;
+}
+
+export interface SubmissionListItem {
+  id: number;
+  visitorId: number;
+  aliasFull: string;
+  messagePreview: string;
+  createdAt: number;
+}
+
+export interface AuditEntry {
+  id: number;
+  event: string;
+  visitorId: number | null;
+  detail: string | null;
+  createdAt: number;
+}
+
+export interface FailureSummary {
+  event: string;
+  count: number;
+  lastAt: number;
+}
+
+export interface DashboardStats {
+  sendsToday: number;
+  visitorsActive: number;
+  visitorsBlocked: number;
+  failures24h: FailureSummary[];
+}
+
 interface VisitorRowDb {
   id: number;
   email_ct: Buffer;
@@ -90,6 +130,20 @@ export class Repo {
   private readonly readSendsToday: Database.Statement<[string]>;
   private readonly insertAudit: Database.Statement;
 
+  // Admin read/write paths.
+  private readonly listVisitorsStmt: Database.Statement;
+  private readonly countVisitorsStmt: Database.Statement;
+  private readonly searchVisitorsStmt: Database.Statement;
+  private readonly findVisitorByIdStmt: Database.Statement<[number]>;
+  private readonly setVisitorStatusStmt: Database.Statement;
+  private readonly listSubmissionsByVisitorStmt: Database.Statement;
+  private readonly countSubmissionsByVisitorStmt: Database.Statement<[number]>;
+  private readonly findSubmissionByIdStmt: Database.Statement<[number]>;
+  private readonly listSubmissionsStmt: Database.Statement;
+  private readonly listAuditStmt: Database.Statement;
+  private readonly countAuditStmt: Database.Statement;
+  private readonly recentFailuresStmt: Database.Statement<[number]>;
+
   constructor(
     private readonly db: Database.Database,
     private readonly keys: CryptoKeys,
@@ -124,6 +178,80 @@ export class Repo {
     this.insertAudit = db.prepare(
       `INSERT INTO audit_log (event, visitor_id, detail, created_at)
        VALUES (@event, @visitor_id, @detail, @now)`,
+    );
+
+    this.listVisitorsStmt = db.prepare(
+      `SELECT id, email_ct, name_ct, alias_local, alias_full, sl_alias_id,
+              sl_reverse_alias, status, created_at, last_seen_at
+         FROM visitors
+        WHERE (@status IS NULL OR status = @status)
+        ORDER BY last_seen_at DESC, id DESC
+        LIMIT @limit OFFSET @offset`,
+    );
+    this.countVisitorsStmt = db.prepare(
+      `SELECT COUNT(*) AS c FROM visitors
+        WHERE (@status IS NULL OR status = @status)`,
+    );
+    // LIKE escape char is '\' — caller pre-escapes the user input.
+    this.searchVisitorsStmt = db.prepare(
+      `SELECT id, email_ct, name_ct, alias_local, alias_full, sl_alias_id,
+              sl_reverse_alias, status, created_at, last_seen_at
+         FROM visitors
+        WHERE alias_local LIKE @q ESCAPE '\\'
+           OR alias_full  LIKE @q ESCAPE '\\'
+        ORDER BY last_seen_at DESC, id DESC
+        LIMIT @limit`,
+    );
+    this.findVisitorByIdStmt = db.prepare(
+      `SELECT id, email_ct, name_ct, alias_local, alias_full, sl_alias_id,
+              sl_reverse_alias, status, created_at, last_seen_at
+         FROM visitors WHERE id = ?`,
+    );
+    this.setVisitorStatusStmt = db.prepare(
+      `UPDATE visitors SET status = @status WHERE id = @id`,
+    );
+    this.listSubmissionsByVisitorStmt = db.prepare(
+      `SELECT id, message_ct, ip_hash, ua_hash, created_at
+         FROM submissions
+        WHERE visitor_id = @visitor_id
+        ORDER BY created_at DESC, id DESC
+        LIMIT @limit OFFSET @offset`,
+    );
+    this.countSubmissionsByVisitorStmt = db.prepare(
+      `SELECT COUNT(*) AS c FROM submissions WHERE visitor_id = ?`,
+    );
+    this.findSubmissionByIdStmt = db.prepare(
+      `SELECT id, visitor_id, message_ct, ip_hash, ua_hash, created_at
+         FROM submissions WHERE id = ?`,
+    );
+    this.listSubmissionsStmt = db.prepare(
+      `SELECT s.id, s.visitor_id, s.message_ct, s.created_at, v.alias_full
+         FROM submissions s
+         JOIN visitors  v ON v.id = s.visitor_id
+        WHERE s.created_at >= @since
+        ORDER BY s.created_at DESC, s.id DESC
+        LIMIT @limit OFFSET @offset`,
+    );
+    this.listAuditStmt = db.prepare(
+      `SELECT id, event, visitor_id, detail, created_at
+         FROM audit_log
+        WHERE (@event IS NULL OR event = @event)
+          AND created_at >= @since
+        ORDER BY created_at DESC, id DESC
+        LIMIT @limit OFFSET @offset`,
+    );
+    this.countAuditStmt = db.prepare(
+      `SELECT COUNT(*) AS c FROM audit_log
+        WHERE (@event IS NULL OR event = @event)
+          AND created_at >= @since`,
+    );
+    this.recentFailuresStmt = db.prepare(
+      `SELECT event, COUNT(*) AS count, MAX(created_at) AS lastAt
+         FROM audit_log
+        WHERE created_at >= ?
+          AND event IN ('mint_failed', 'smtp_send_failed', 'circuit_breaker_skip')
+        GROUP BY event
+        ORDER BY lastAt DESC`,
     );
   }
 
@@ -206,6 +334,164 @@ export class Repo {
       now: Date.now(),
     });
   }
+
+  listVisitors(opts: { status?: VisitorStatus | null; limit: number; offset: number }): VisitorRow[] {
+    const rows = this.listVisitorsStmt.all({
+      status: opts.status ?? null,
+      limit: opts.limit,
+      offset: opts.offset,
+    }) as VisitorRowDb[];
+    return rows.map((r) => rowToVisitor(r, this.keys));
+  }
+
+  countVisitors(status: VisitorStatus | null = null): number {
+    const row = this.countVisitorsStmt.get({ status }) as { c: number };
+    return row.c;
+  }
+
+  searchVisitors(query: string, limit: number): VisitorRow[] {
+    const escaped = escapeLike(query);
+    const rows = this.searchVisitorsStmt.all({
+      q: `%${escaped}%`,
+      limit,
+    }) as VisitorRowDb[];
+    return rows.map((r) => rowToVisitor(r, this.keys));
+  }
+
+  getVisitorById(id: number): VisitorRow | null {
+    const row = this.findVisitorByIdStmt.get(id) as VisitorRowDb | undefined;
+    return row ? rowToVisitor(row, this.keys) : null;
+  }
+
+  setVisitorStatus(id: number, status: VisitorStatus): boolean {
+    const result = this.setVisitorStatusStmt.run({ id, status });
+    return result.changes > 0;
+  }
+
+  listSubmissionsByVisitor(visitorId: number, limit: number, offset: number): SubmissionRow[] {
+    const rows = this.listSubmissionsByVisitorStmt.all({
+      visitor_id: visitorId,
+      limit,
+      offset,
+    }) as Array<{
+      id: number;
+      message_ct: Buffer;
+      ip_hash: Buffer | null;
+      ua_hash: Buffer | null;
+      created_at: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      visitorId,
+      message: decryptColumn(r.message_ct, this.keys),
+      ipHashHex: r.ip_hash ? r.ip_hash.toString("hex") : null,
+      uaHashHex: r.ua_hash ? r.ua_hash.toString("hex") : null,
+      createdAt: r.created_at,
+    }));
+  }
+
+  countSubmissionsByVisitor(visitorId: number): number {
+    const row = this.countSubmissionsByVisitorStmt.get(visitorId) as { c: number };
+    return row.c;
+  }
+
+  getSubmissionById(id: number): SubmissionRow | null {
+    const row = this.findSubmissionByIdStmt.get(id) as
+      | {
+          id: number;
+          visitor_id: number;
+          message_ct: Buffer;
+          ip_hash: Buffer | null;
+          ua_hash: Buffer | null;
+          created_at: number;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      visitorId: row.visitor_id,
+      message: decryptColumn(row.message_ct, this.keys),
+      ipHashHex: row.ip_hash ? row.ip_hash.toString("hex") : null,
+      uaHashHex: row.ua_hash ? row.ua_hash.toString("hex") : null,
+      createdAt: row.created_at,
+    };
+  }
+
+  listSubmissions(opts: { limit: number; offset: number; sinceMs?: number }): SubmissionListItem[] {
+    const rows = this.listSubmissionsStmt.all({
+      limit: opts.limit,
+      offset: opts.offset,
+      since: opts.sinceMs ?? 0,
+    }) as Array<{
+      id: number;
+      visitor_id: number;
+      message_ct: Buffer;
+      created_at: number;
+      alias_full: string;
+    }>;
+    return rows.map((r) => {
+      const message = decryptColumn(r.message_ct, this.keys);
+      return {
+        id: r.id,
+        visitorId: r.visitor_id,
+        aliasFull: r.alias_full,
+        messagePreview: message.length > 200 ? `${message.slice(0, 200)}…` : message,
+        createdAt: r.created_at,
+      };
+    });
+  }
+
+  listAudit(opts: {
+    event?: string | null;
+    limit: number;
+    offset: number;
+    sinceMs?: number;
+  }): AuditEntry[] {
+    const rows = this.listAuditStmt.all({
+      event: opts.event ?? null,
+      since: opts.sinceMs ?? 0,
+      limit: opts.limit,
+      offset: opts.offset,
+    }) as Array<{
+      id: number;
+      event: string;
+      visitor_id: number | null;
+      detail: string | null;
+      created_at: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      event: r.event,
+      visitorId: r.visitor_id,
+      detail: r.detail,
+      createdAt: r.created_at,
+    }));
+  }
+
+  countAudit(opts: { event?: string | null; sinceMs?: number } = {}): number {
+    const row = this.countAuditStmt.get({
+      event: opts.event ?? null,
+      since: opts.sinceMs ?? 0,
+    }) as { c: number };
+    return row.c;
+  }
+
+  recentFailures(sinceMs: number): FailureSummary[] {
+    return this.recentFailuresStmt.all(sinceMs) as FailureSummary[];
+  }
+
+  dashboardStats(now: Date = new Date()): DashboardStats {
+    return {
+      sendsToday: this.dailyCount(now),
+      visitorsActive: this.countVisitors("active"),
+      visitorsBlocked: this.countVisitors("blocked"),
+      failures24h: this.recentFailures(now.getTime() - 24 * 60 * 60 * 1000),
+    };
+  }
+}
+
+function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, (m) => `\\${m}`);
 }
 
 export function utcDay(d: Date): string {

@@ -51,4 +51,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_log_event_time
   ON audit_log(event, created_at DESC);
 
-PRAGMA user_version = 1;
+CREATE INDEX IF NOT EXISTS idx_audit_log_time
+  ON audit_log(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_visitors_status_lastseen
+  ON visitors(status, last_seen_at DESC);
+
+PRAGMA user_version = 2;
