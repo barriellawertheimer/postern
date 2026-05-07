@@ -1,0 +1,38 @@
+{
+  "name": "postern",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contact-form visitor-alias backend: Turnstile + SimpleLogin + Proton SMTP, encrypted SQLite at rest.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.2.1",
+    "better-sqlite3": "^11.7.0",
+    "fastify": "^5.2.1",
+    "nodemailer": "^6.9.16",
+    "pino": "^9.5.0",
+    "undici": "^7.2.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "@types/nodemailer": "^6.4.17",
+    "msw": "^2.7.0",
+    "nodemailer-mock": "^2.0.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
