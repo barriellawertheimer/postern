@@ -21,12 +21,30 @@ returning visitors don't get a new one each time.
 
 ```bash
 npm install
+npm run setup        # interactive: prompts for creds, generates keys, writes .env (mode 0600)
+npm run dev
+```
+
+`npm run setup` walks through each credential one at a time (secrets are
+read with no echo), auto-generates `ENC_KEY`/`LOOKUP_KEY`/`ADMIN_SESSION_SECRET`,
+hashes the admin password if you opt into the admin UI, and validates the
+assembled config before writing — if it would fail at boot, it fails here.
+Re-run with `npm run setup -- --force` to regenerate (existing
+`ENC_KEY`/`LOOKUP_KEY` are preserved so the encrypted DB stays readable).
+
+The output is still a plaintext `.env` on disk — file permissions are the
+security boundary, same as a hand-edited `.env` would be. The setup CLI is
+a UX win, not a stronger threat model.
+
+### Manual setup
+
+If you'd rather not run the interactive CLI:
+
+```bash
 cp .env.example .env
-# Generate two independent 32-byte keys
 node -e "console.log('ENC_KEY='+require('node:crypto').randomBytes(32).toString('hex'))"
 node -e "console.log('LOOKUP_KEY='+require('node:crypto').randomBytes(32).toString('hex'))"
 # Paste them into .env, plus your SL/Proton/Turnstile creds
-npm run dev
 ```
 
 `POST /contact` with:
@@ -299,27 +317,17 @@ without a compiler. The image is **not** built for `linux/arm/v7`
 ```bash
 git clone <your fork> postern && cd postern
 
-# 1. Generate the encryption keys.
-cp .env.example .env
-node -e "console.log('ENC_KEY='+require('node:crypto').randomBytes(32).toString('hex'))" >> .env
-node -e "console.log('LOOKUP_KEY='+require('node:crypto').randomBytes(32).toString('hex'))" >> .env
+# 1. Configure. Walks through every credential, generates keys, optionally
+#    enables the admin UI (prompts for a password and hashes it inline).
+npm install
+npm run setup
 
-# 2. Edit .env: paste SL_API_KEY, OWNER_DOMAIN, SMTP_USER, SMTP_PASS,
-#    TURNSTILE_SECRET, and (optional) ALLOWED_ORIGINS.
-$EDITOR .env
-
-# 3. (Optional) Enable the admin UI.
-node -e "console.log('ADMIN_SESSION_SECRET='+require('node:crypto').randomBytes(32).toString('hex'))" >> .env
-npm install && npm run hash:admin
-# Paste the printed scrypt$... line into .env as ADMIN_PASSWORD_HASH=...
-# Set ADMIN_ENABLED=true.
-
-# 4. Make ./data writable by uid 1000 (Linux Docker only — Docker Desktop
+# 2. Make ./data writable by uid 1000 (Linux Docker only — Docker Desktop
 #    on Mac/Windows handles uid mapping for you).
 mkdir -p data
 sudo chown 1000:1000 data
 
-# 5. Build + boot.
+# 3. Build + boot.
 docker compose up -d --build
 docker compose logs -f
 
@@ -327,6 +335,9 @@ docker compose logs -f
 curl http://127.0.0.1:8787/healthz
 # → {"status":"ok","time":"..."}
 ```
+
+If you'd rather configure by hand, see [Manual setup](#manual-setup) above
+and `npm run hash:admin` for the admin password hash.
 
 The compose service publishes `127.0.0.1:8787:8787` — meaning the
 container port is reachable only from the host loopback. This is
