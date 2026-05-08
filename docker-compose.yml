@@ -1,0 +1,28 @@
+# Reference compose file. The published port binds to 127.0.0.1 only —
+# put a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare Tunnel) in
+# front of this. To expose publicly without a proxy, change the port line
+# to "8787:8787" (be aware admin cookies need Secure=true over HTTPS).
+
+services:
+  postern:
+    build: .
+    image: postern:latest
+    container_name: postern
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    env_file:
+      - .env
+    volumes:
+      # SQLite WAL files live alongside the main DB — bind-mount the whole dir.
+      - ./data:/data
+      # Optional: mount a key file (mode 0600 outside the container, JSON
+      # {enc, lookup}). Set KEY_FILE=/secrets/keys.json in .env to use it
+      # in place of ENC_KEY / LOOKUP_KEY env vars.
+      # - ./keys.json:/secrets/keys.json:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.PORT+'/healthz').then(r=>{if(r.status!==200)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3

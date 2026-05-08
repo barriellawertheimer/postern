@@ -1,0 +1,40 @@
+# Build hygiene
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+README.md
+i-think-i-didnt-ethereal-flamingo.md
+
+# Dependencies + build output (regenerated inside the image)
+node_modules
+admin-ui/node_modules
+admin-ui/dist
+dist
+*.tsbuildinfo
+
+# Local data + secrets — must NOT enter the image
+data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+keys.bin
+*.key
+*.json.key
+
+# Test + dev tooling
+test
+coverage
+.vitest-cache
+*.log
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+*.swp
