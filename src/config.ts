@@ -152,15 +152,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     .filter(Boolean);
 
   const isProd = parsed.NODE_ENV === "production";
+  // ADMIN_PASSWORD_HASH is the bootstrap seed for first-boot only; once
+  // `admin_state` is populated the DB row is the source of truth. The boot
+  // wiring (server.ts) enforces "at least one of env/DB must provide a hash"
+  // — we don't fail here on a missing env when adminEnabled, because a DB
+  // row from a previous boot is a valid alternative.
   let adminPasswordHash: string | null = null;
   let adminSessionSecret: Buffer | null = null;
   if (parsed.ADMIN_ENABLED) {
-    if (!parsed.ADMIN_PASSWORD_HASH || !parsed.ADMIN_SESSION_SECRET) {
-      throw new Error(
-        "ADMIN_ENABLED=true requires ADMIN_PASSWORD_HASH and ADMIN_SESSION_SECRET",
-      );
+    if (!parsed.ADMIN_SESSION_SECRET) {
+      throw new Error("ADMIN_ENABLED=true requires ADMIN_SESSION_SECRET");
     }
-    adminPasswordHash = parsed.ADMIN_PASSWORD_HASH;
+    adminPasswordHash = parsed.ADMIN_PASSWORD_HASH ?? null;
     adminSessionSecret = decodeKey(parsed.ADMIN_SESSION_SECRET, "ADMIN_SESSION_SECRET");
     if (adminSessionSecret.equals(encKey) || adminSessionSecret.equals(lookupKey)) {
       throw new Error("ADMIN_SESSION_SECRET must be independent of ENC_KEY/LOOKUP_KEY");

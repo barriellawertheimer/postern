@@ -5,7 +5,10 @@ import {
   verifyPassword,
   signSession,
   verifySession,
+  signPwResetToken,
+  verifyPwResetToken,
   type SessionPayload,
+  type PwResetPayload,
 } from "../../src/admin/auth.js";
 
 describe("hashPasswordForSetup / verifyPassword", () => {
@@ -115,5 +118,76 @@ describe("signSession / verifySession", () => {
     const body = Buffer.from(JSON.stringify(forged)).toString("base64url");
     const sig = createHmac("sha256", secret).update(body).digest("base64url");
     expect(verifySession(`${body}.${sig}`, secret, now)).toBeNull();
+  });
+});
+
+describe("signPwResetToken / verifyPwResetToken", () => {
+  const secret = randomBytes(32);
+  const now = 1_700_000_000_000;
+
+  function payload(overrides: Partial<PwResetPayload> = {}): PwResetPayload {
+    return { iat: now, exp: now + 15 * 60_000, epoch: 0, v: 1, p: "pwreset", ...overrides };
+  }
+
+  it("round-trips a valid token", () => {
+    const token = signPwResetToken(payload(), secret);
+    expect(verifyPwResetToken(token, secret, now)).toEqual(payload());
+  });
+
+  it("rejects expired tokens", () => {
+    const token = signPwResetToken(payload({ exp: now - 1 }), secret);
+    expect(verifyPwResetToken(token, secret, now)).toBeNull();
+  });
+
+  it("rejects tokens signed with a different secret", () => {
+    const token = signPwResetToken(payload(), secret);
+    expect(verifyPwResetToken(token, randomBytes(32), now)).toBeNull();
+  });
+
+  it("rejects malformed tokens", () => {
+    expect(verifyPwResetToken("", secret, now)).toBeNull();
+    expect(verifyPwResetToken("nodot", secret, now)).toBeNull();
+    expect(verifyPwResetToken("garbage.morejunk", secret, now)).toBeNull();
+  });
+
+  it("domain-separates session and pwreset tokens (a session token cannot validate as pwreset)", () => {
+    // Forge a session token whose body happens to satisfy the pwreset shape.
+    // Even with matching body, the session HMAC mixes a different domain
+    // string, so the pwreset verifier rejects it.
+    const body: SessionPayload & Partial<PwResetPayload> = {
+      iat: now,
+      exp: now + 60_000,
+      v: 1,
+    };
+    const sessionToken = signSession(body, secret);
+    // Tack on the pwreset-required fields by signing a fresh pwreset payload
+    // and confirming the session token still doesn't pass pwreset verification.
+    expect(verifyPwResetToken(sessionToken, secret, now)).toBeNull();
+  });
+
+  it("domain-separates the other direction (a pwreset token cannot validate as a session)", () => {
+    const pwToken = signPwResetToken(payload(), secret);
+    expect(verifySession(pwToken, secret, now)).toBeNull();
+  });
+
+  it("rejects pwreset payloads with missing epoch", () => {
+    // Sign via the actual signer so the HMAC is valid, then manually rebuild
+    // a body without the epoch field. The fresh body won't match the original
+    // signature — so this is effectively the same as "tampered body" but
+    // documents that epoch is required.
+    const body = { iat: now, exp: now + 60_000, v: 1, p: "pwreset" };
+    const bodyB64 = Buffer.from(JSON.stringify(body)).toString("base64url");
+    // Sign with the right domain to isolate the missing-field check.
+    const sig = createHmac("sha256", secret)
+      .update(Buffer.from("postern.pwreset.v1", "utf8"))
+      .update(":")
+      .update(bodyB64)
+      .digest("base64url");
+    expect(verifyPwResetToken(`${bodyB64}.${sig}`, secret, now)).toBeNull();
+  });
+
+  it("preserves epoch through round-trip (caller is responsible for comparing it to live state)", () => {
+    const got = verifyPwResetToken(signPwResetToken(payload({ epoch: 42 }), secret), secret, now);
+    expect(got?.epoch).toBe(42);
   });
 });

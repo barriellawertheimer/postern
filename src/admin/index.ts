@@ -8,12 +8,14 @@ import type { FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import type { Config } from "../config.js";
 import type { Repo } from "../db/repo.js";
+import type { ProtonMailerLike } from "../services/proton.js";
 import { registerAdminApi } from "./api.js";
 import { registerAdminStatic } from "./static.js";
 
 export interface AdminDeps {
   config: Config;
   repo: Repo;
+  mailer: ProtonMailerLike;
   breakerThreshold: number;
   /** Override the SPA bundle directory (test fixtures use this). */
   staticRoot?: string;

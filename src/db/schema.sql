@@ -57,4 +57,16 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_time
 CREATE INDEX IF NOT EXISTS idx_visitors_status_lastseen
   ON visitors(status, last_seen_at DESC);
 
-PRAGMA user_version = 2;
+-- Single-row table holding the persisted admin password hash and a
+-- monotonically increasing reset epoch. Tokens minted by /forgot embed
+-- the current epoch; /reset bumps the epoch atomically with the new
+-- hash, which is what invalidates every outstanding token in one shot
+-- (and enforces single-use for the token that was just consumed).
+CREATE TABLE IF NOT EXISTS admin_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  password_hash   TEXT NOT NULL,
+  pwreset_epoch   INTEGER NOT NULL DEFAULT 0,
+  updated_at      INTEGER NOT NULL
+);
+
+PRAGMA user_version = 3;

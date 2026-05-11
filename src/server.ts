@@ -139,12 +139,26 @@ export async function buildApp(opts: BuildOptions = {}): Promise<BuiltApp> {
   await registerContactRoute(app, { config, repo, aliasMint, mailer, turnstile });
 
   if (config.adminEnabled) {
+    // Seed admin_state from the env hash on first boot. After that the DB row
+    // is the source of truth — env becomes irrelevant unless the DB is wiped.
+    const existing = repo.getAdminState();
+    if (!existing) {
+      if (!config.adminPasswordHash) {
+        throw new Error(
+          "ADMIN_ENABLED=true with no admin_state in DB requires ADMIN_PASSWORD_HASH for first-boot seed",
+        );
+      }
+      repo.seedAdminState(config.adminPasswordHash);
+      app.log.info("seeded admin_state from ADMIN_PASSWORD_HASH");
+    }
+
     const breakerThreshold = Math.floor(
       config.env.PROTON_DAILY_CAP * config.env.CIRCUIT_BREAKER_PCT,
     );
     await registerAdmin(app, {
       config,
       repo,
+      mailer,
       breakerThreshold,
       ...(opts.overrides?.adminStaticRoot !== undefined
         ? { staticRoot: opts.overrides.adminStaticRoot }

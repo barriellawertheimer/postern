@@ -77,6 +77,12 @@ export interface DashboardStats {
   failures24h: FailureSummary[];
 }
 
+export interface AdminState {
+  passwordHash: string;
+  pwresetEpoch: number;
+  updatedAt: number;
+}
+
 interface VisitorRowDb {
   id: number;
   email_ct: Buffer;
@@ -131,6 +137,9 @@ export class Repo {
   private readonly insertAudit: Database.Statement;
 
   // Admin read/write paths.
+  private readonly readAdminStateStmt: Database.Statement;
+  private readonly seedAdminStateStmt: Database.Statement;
+  private readonly updateAdminPasswordStmt: Database.Statement;
   private readonly listVisitorsStmt: Database.Statement;
   private readonly countVisitorsStmt: Database.Statement;
   private readonly searchVisitorsStmt: Database.Statement;
@@ -178,6 +187,23 @@ export class Repo {
     this.insertAudit = db.prepare(
       `INSERT INTO audit_log (event, visitor_id, detail, created_at)
        VALUES (@event, @visitor_id, @detail, @now)`,
+    );
+
+    this.readAdminStateStmt = db.prepare(
+      `SELECT password_hash, pwreset_epoch, updated_at
+         FROM admin_state WHERE id = 1`,
+    );
+    this.seedAdminStateStmt = db.prepare(
+      `INSERT INTO admin_state (id, password_hash, pwreset_epoch, updated_at)
+       VALUES (1, @hash, 0, @now)
+       ON CONFLICT(id) DO NOTHING`,
+    );
+    this.updateAdminPasswordStmt = db.prepare(
+      `UPDATE admin_state
+          SET password_hash = @hash,
+              pwreset_epoch = pwreset_epoch + 1,
+              updated_at = @now
+        WHERE id = 1`,
     );
 
     this.listVisitorsStmt = db.prepare(
@@ -478,6 +504,36 @@ export class Repo {
 
   recentFailures(sinceMs: number): FailureSummary[] {
     return this.recentFailuresStmt.all(sinceMs) as FailureSummary[];
+  }
+
+  getAdminState(): AdminState | null {
+    const row = this.readAdminStateStmt.get() as
+      | { password_hash: string; pwreset_epoch: number; updated_at: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      passwordHash: row.password_hash,
+      pwresetEpoch: row.pwreset_epoch,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /** Inserts the initial admin_state row. No-op if the row already exists. */
+  seedAdminState(passwordHash: string): void {
+    this.seedAdminStateStmt.run({ hash: passwordHash, now: Date.now() });
+  }
+
+  /**
+   * Atomically replace the password hash and bump pwreset_epoch by 1.
+   * Returns the new state. Throws if no admin_state row exists (caller must
+   * have seeded first).
+   */
+  updateAdminPassword(passwordHash: string): AdminState {
+    const result = this.updateAdminPasswordStmt.run({ hash: passwordHash, now: Date.now() });
+    if (result.changes === 0) throw new Error("admin_state row missing; seed before update");
+    const state = this.getAdminState();
+    if (!state) throw new Error("admin_state row vanished after update");
+    return state;
   }
 
   dashboardStats(now: Date = new Date()): DashboardStats {

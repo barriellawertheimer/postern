@@ -6,11 +6,19 @@
 // The login route is intentionally rate-limited tighter than the rest
 // (5 / 15 min per IP) to make brute-force expensive.
 
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import type { Repo } from "../db/repo.js";
-import { signSession, verifyPassword } from "./auth.js";
+import type { ProtonMailerLike } from "../services/proton.js";
+import {
+  hashPasswordForSetup,
+  signPwResetToken,
+  signSession,
+  verifyPassword,
+  verifyPwResetToken,
+} from "./auth.js";
 import {
   ADMIN_COOKIE_NAME,
   makeRequireAdmin,
@@ -21,8 +29,12 @@ import type { VisitorRow } from "../db/repo.js";
 export interface AdminApiDeps {
   config: Config;
   repo: Repo;
+  mailer: ProtonMailerLike;
   breakerThreshold: number;
 }
+
+const PWRESET_TTL_MS = 15 * 60 * 1000;
+const MIN_PASSWORD_LEN = 8;
 
 const PAGE_LIMIT_DEFAULT = 50;
 const PAGE_LIMIT_MAX = 200;
@@ -48,18 +60,25 @@ const AuditQuery = PaginationQuery.extend({
 
 const IdParams = z.object({ id: z.coerce.number().int().positive() });
 const LoginBody = z.object({ password: z.string().min(1).max(1024) });
+const ForgotBody = z.object({ email: z.string().trim().min(1).max(254) });
+const ResetBody = z.object({
+  token: z.string().min(1).max(4096),
+  password: z.string().min(MIN_PASSWORD_LEN).max(1024),
+});
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function registerAdminApi(app: FastifyInstance, deps: AdminApiDeps): Promise<void> {
-  const { config, repo, breakerThreshold } = deps;
-  if (!config.adminEnabled || !config.adminPasswordHash || !config.adminSessionSecret) {
+  const { config, repo, mailer, breakerThreshold } = deps;
+  if (!config.adminEnabled || !config.adminSessionSecret) {
     throw new Error("registerAdminApi called without admin config");
   }
-  const passwordHash = config.adminPasswordHash;
+  // Live hash: read on every login so resets are picked up without a restart.
+  // The admin_state row is seeded at boot in server.ts before we get here.
   const sessionSecret = config.adminSessionSecret;
   const requireAdmin = makeRequireAdmin(sessionSecret);
   const cookieMaxAgeSec = Math.floor(config.adminSessionTtlMs / 1000);
+  const ownerEmail = config.ownerEmail;
 
   // Treat empty bodies on POST as {} so block/unblock/logout don't need a body.
   // Replaces Fastify's default JSON parser within this encapsulation only.
@@ -106,7 +125,12 @@ export async function registerAdminApi(app: FastifyInstance, deps: AdminApiDeps)
       if (!parsed.success) {
         return reply.code(400).send({ error: "invalid_input" });
       }
-      if (!verifyPassword(parsed.data.password, passwordHash)) {
+      const adminState = repo.getAdminState();
+      if (!adminState) {
+        request.log.error("admin_state row missing at login time");
+        return reply.code(500).send({ error: "server_error" });
+      }
+      if (!verifyPassword(parsed.data.password, adminState.passwordHash)) {
         request.log.warn({ ip: request.ip }, "admin login failed");
         return reply.code(401).send({ error: "invalid_credentials" });
       }
@@ -136,6 +160,112 @@ export async function registerAdminApi(app: FastifyInstance, deps: AdminApiDeps)
     authenticated: true,
     exp: request.adminSession!.exp,
   }));
+
+  // Password reset request. Mints a short-lived HMAC token bound to the
+  // current pwreset_epoch, mails the recovery link to the owner mailbox
+  // via Proton SMTP, and always returns 204 (no enumeration / no leak of
+  // whether the supplied email matched). Tight rate-limit on top of the
+  // 1-msg/sec Proton transport limit.
+  app.post(
+    "/forgot",
+    {
+      config: {
+        rateLimit: {
+          max: 3,
+          timeWindow: "1 hour",
+          keyGenerator: (req) => req.ip,
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = ForgotBody.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid_input" });
+      }
+      // Constant-time owner-email compare — refuse to enqueue mail unless the
+      // supplied email exactly matches the configured owner. This prevents
+      // trivial mail-bombing of the owner inbox.
+      const provided = Buffer.from(parsed.data.email.toLowerCase(), "utf8");
+      const expected = Buffer.from(ownerEmail.toLowerCase(), "utf8");
+      const sameLen = provided.length === expected.length;
+      const matches = sameLen && timingSafeEqual(provided, expected);
+      if (!matches) {
+        // Audit so brute-force enumeration is visible, but still 204 to
+        // the caller. Logging the IP is fine; the email is not echoed.
+        repo.audit("admin_pwreset_email_mismatch", { detail: `ip=${request.ip}` });
+        return reply.code(204).send();
+      }
+
+      const state = repo.getAdminState();
+      if (!state) {
+        request.log.error("admin_state row missing at /forgot");
+        return reply.code(500).send({ error: "server_error" });
+      }
+      const now = Date.now();
+      const token = signPwResetToken(
+        { iat: now, exp: now + PWRESET_TTL_MS, epoch: state.pwresetEpoch, v: 1, p: "pwreset" },
+        sessionSecret,
+      );
+      const proto = request.protocol;
+      const host = request.headers.host ?? "";
+      const link = `${proto}://${host}/admin/reset?token=${encodeURIComponent(token)}`;
+      const ttlMin = Math.floor(PWRESET_TTL_MS / 60_000);
+
+      try {
+        await mailer.sendAdminMail({
+          subject: "Postern admin: password reset",
+          text: renderResetText(link, ttlMin, request.ip),
+          html: renderResetHtml(link, ttlMin, request.ip),
+        });
+        repo.audit("admin_pwreset_requested", { detail: `ip=${request.ip}` });
+      } catch (err) {
+        request.log.warn({ err, ip: request.ip }, "admin pwreset mail failed");
+        repo.audit("admin_pwreset_mail_failed", { detail: `ip=${request.ip}` });
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/reset",
+    {
+      config: {
+        rateLimit: {
+          max: 5,
+          timeWindow: "15 minutes",
+          keyGenerator: (req) => req.ip,
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = ResetBody.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid_input" });
+      }
+      const payload = verifyPwResetToken(parsed.data.token, sessionSecret);
+      if (!payload) {
+        repo.audit("admin_pwreset_invalid_token", { detail: `ip=${request.ip}` });
+        return reply.code(401).send({ error: "invalid_token" });
+      }
+      const state = repo.getAdminState();
+      if (!state) {
+        request.log.error("admin_state row missing at /reset");
+        return reply.code(500).send({ error: "server_error" });
+      }
+      // Epoch mismatch means the token was minted before a more recent reset
+      // (or another concurrent reset finished first). Either way, dead.
+      if (payload.epoch !== state.pwresetEpoch) {
+        repo.audit("admin_pwreset_stale_epoch", { detail: `ip=${request.ip}` });
+        return reply.code(401).send({ error: "invalid_token" });
+      }
+
+      const newHash = hashPasswordForSetup(parsed.data.password);
+      repo.updateAdminPassword(newHash);
+      repo.audit("admin_pwreset_completed", { detail: `ip=${request.ip}` });
+      request.log.info({ ip: request.ip }, "admin password reset ok");
+      return reply.code(204).send();
+    },
+  );
 
   // --- Dashboard -----------------------------------------------------------
 
@@ -256,6 +386,47 @@ export async function registerAdminApi(app: FastifyInstance, deps: AdminApiDeps)
     const total = repo.countAudit(countOpts);
     return { rows, total };
   });
+}
+
+function renderResetText(link: string, ttlMin: number, requesterIp: string): string {
+  return [
+    `Someone requested a password reset for the Postern admin UI.`,
+    ``,
+    `Reset link (valid for ${ttlMin} minutes, single-use):`,
+    link,
+    ``,
+    `Requested from IP: ${requesterIp}`,
+    ``,
+    `If you did not request this, you can ignore this email — the link will`,
+    `expire on its own and your current password is still valid. Any future`,
+    `reset will invalidate this link.`,
+  ].join("\n");
+}
+
+function renderResetHtml(link: string, ttlMin: number, requesterIp: string): string {
+  const safeLink = escapeHtmlAttr(link);
+  const safeIp = escapeHtmlAttr(requesterIp);
+  return `<!doctype html>
+<html><body style="font-family:system-ui,-apple-system,sans-serif;line-height:1.5">
+<h2 style="margin:0 0 12px 0">Postern admin password reset</h2>
+<p>Someone requested a password reset for the Postern admin UI.</p>
+<p><a href="${safeLink}">Reset password</a> &nbsp; <small>(valid for ${ttlMin} minutes, single-use)</small></p>
+<p style="font-size:12px;color:#666">Requested from IP: <code>${safeIp}</code></p>
+<p style="font-size:12px;color:#666">
+If you did not request this, you can ignore this email — the link will expire
+on its own and your current password is still valid. Any future reset will
+invalidate this link.
+</p>
+</body></html>`;
+}
+
+function escapeHtmlAttr(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function visitorToDto(v: VisitorRow) {

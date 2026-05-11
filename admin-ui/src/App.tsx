@@ -1,6 +1,8 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./routes/Layout";
 import { Login } from "./routes/Login";
+import { Forgot } from "./routes/Forgot";
+import { Reset } from "./routes/Reset";
 import { Dashboard } from "./routes/Dashboard";
 import { Visitors } from "./routes/Visitors";
 import { VisitorDetail } from "./routes/VisitorDetail";
@@ -12,6 +14,8 @@ export function App() {
     <BrowserRouter basename="/admin">
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/forgot" element={<Forgot />} />
+        <Route path="/reset" element={<Reset />} />
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="visitors" element={<Visitors />} />

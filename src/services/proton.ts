@@ -33,8 +33,20 @@ export interface SendResult {
   accepted: string[];
 }
 
+export interface AdminMail {
+  subject: string;
+  text: string;
+  html: string;
+}
+
 export interface ProtonMailerLike {
   send(input: OwnerNotification): Promise<SendResult>;
+  /**
+   * Send an admin-only operational mail (e.g. password reset link) to the
+   * owner mailbox. Recipient is always `ownerEmail` — there is no `to`
+   * parameter so this can't be abused as a relay.
+   */
+  sendAdminMail(input: AdminMail): Promise<SendResult>;
   close(): Promise<void>;
 }
 
@@ -77,6 +89,23 @@ export class ProtonMailer implements ProtonMailerLike {
       },
     });
 
+    return {
+      messageId: info.messageId,
+      accepted: (info.accepted ?? []).map(String),
+    };
+  }
+
+  async sendAdminMail(input: AdminMail): Promise<SendResult> {
+    const info = await this.transport.sendMail({
+      from: this.cfg.ownerEmail,
+      to: this.cfg.ownerEmail,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      headers: {
+        "X-Postern-Source": "admin",
+      },
+    });
     return {
       messageId: info.messageId,
       accepted: (info.accepted ?? []).map(String),

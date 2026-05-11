@@ -73,11 +73,24 @@ export interface SessionPayload {
   v: 1;
 }
 
+// Domain-separation prefixes mixed into the HMAC input. A session token's
+// signature can never validate as a pwreset token (and vice versa) even
+// though they share `ADMIN_SESSION_SECRET`.
+const DOMAIN_SESSION = Buffer.from("postern.session.v1", "utf8");
+const DOMAIN_PWRESET = Buffer.from("postern.pwreset.v1", "utf8");
+
+function sign(domain: Buffer, body: string, secret: Buffer): string {
+  return createHmac("sha256", secret).update(domain).update(":").update(body).digest("base64url");
+}
+
+function expectedSigBytes(domain: Buffer, body: string, secret: Buffer): Buffer {
+  return createHmac("sha256", secret).update(domain).update(":").update(body).digest();
+}
+
 /** `<b64u(JSON(payload))>.<b64u(HMAC-SHA256)>` */
 export function signSession(payload: SessionPayload, secret: Buffer): string {
   const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const sig = createHmac("sha256", secret).update(body).digest("base64url");
-  return `${body}.${sig}`;
+  return `${body}.${sign(DOMAIN_SESSION, body, secret)}`;
 }
 
 /** Returns the payload on success; null on any failure (malformed, bad sig, expired, wrong version). */
@@ -86,31 +99,65 @@ export function verifySession(
   secret: Buffer,
   now: number = Date.now(),
 ): SessionPayload | null {
+  const parsed = parseAndVerify(token, secret, DOMAIN_SESSION);
+  if (!parsed) return null;
+  if (!isSessionPayload(parsed)) return null;
+  if (parsed.exp <= now) return null;
+  return parsed;
+}
+
+export interface PwResetPayload {
+  /** issued-at, ms since epoch */
+  iat: number;
+  /** expiry, ms since epoch */
+  exp: number;
+  /** admin_state.pwreset_epoch the token was minted against */
+  epoch: number;
+  /** schema version; bump if payload shape changes */
+  v: 1;
+  /** purpose tag — belt-and-braces alongside the domain-separated HMAC */
+  p: "pwreset";
+}
+
+export function signPwResetToken(payload: PwResetPayload, secret: Buffer): string {
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `${body}.${sign(DOMAIN_PWRESET, body, secret)}`;
+}
+
+export function verifyPwResetToken(
+  token: string,
+  secret: Buffer,
+  now: number = Date.now(),
+): PwResetPayload | null {
+  const parsed = parseAndVerify(token, secret, DOMAIN_PWRESET);
+  if (!parsed) return null;
+  if (!isPwResetPayload(parsed)) return null;
+  if (parsed.exp <= now) return null;
+  return parsed;
+}
+
+function parseAndVerify(token: string, secret: Buffer, domain: Buffer): unknown {
   const dot = token.indexOf(".");
   if (dot <= 0 || dot === token.length - 1) return null;
   const body = token.slice(0, dot);
   const sig = token.slice(dot + 1);
 
-  const expectedSig = createHmac("sha256", secret).update(body).digest();
-  let providedSig: Buffer;
+  const expected = expectedSigBytes(domain, body, secret);
+  let provided: Buffer;
   try {
-    providedSig = Buffer.from(sig, "base64url");
+    provided = Buffer.from(sig, "base64url");
   } catch {
     return null;
   }
-  if (providedSig.length !== expectedSig.length) return null;
-  if (!timingSafeEqual(providedSig, expectedSig)) return null;
+  if (provided.length !== expected.length) return null;
+  if (!timingSafeEqual(provided, expected)) return null;
 
-  let payload: unknown;
   try {
     const json = Buffer.from(body, "base64url").toString("utf8");
-    payload = JSON.parse(json);
+    return JSON.parse(json);
   } catch {
     return null;
   }
-  if (!isSessionPayload(payload)) return null;
-  if (payload.exp <= now) return null;
-  return payload;
 }
 
 function isSessionPayload(x: unknown): x is SessionPayload {
@@ -122,5 +169,20 @@ function isSessionPayload(x: unknown): x is SessionPayload {
     typeof o["exp"] === "number" &&
     Number.isFinite(o["iat"]) &&
     Number.isFinite(o["exp"])
+  );
+}
+
+function isPwResetPayload(x: unknown): x is PwResetPayload {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o["v"] === 1 &&
+    o["p"] === "pwreset" &&
+    typeof o["iat"] === "number" &&
+    typeof o["exp"] === "number" &&
+    typeof o["epoch"] === "number" &&
+    Number.isFinite(o["iat"]) &&
+    Number.isFinite(o["exp"]) &&
+    Number.isInteger(o["epoch"])
   );
 }

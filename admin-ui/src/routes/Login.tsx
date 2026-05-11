@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api, HttpError } from "../api";
 
 export function Login() {
@@ -51,6 +51,9 @@ export function Login() {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
       </form>
+      <p>
+        <Link to="/forgot">Forgot password?</Link>
+      </p>
     </main>
   );
 }
