@@ -132,12 +132,24 @@ stdout.write("\nPostern setup — writes .env in this directory.\n");
 stdout.write("Press Ctrl-C at any time to abort (no .env is written until the end).\n\n");
 
 stdout.write("[1/5] Server\n");
-const NODE_ENV = await ask("Environment", { default: "production", validate: isEnvName });
-const HOST = await ask("Bind host", { default: "127.0.0.1" });
-const PORT = await ask("Bind port", { default: "8787", validate: isPort });
-const DATABASE_PATH = await ask("Database path", { default: "./data/postern.db" });
+stdout.write("  How the HTTP server runs and where the encrypted DB lives.\n");
+const NODE_ENV = await ask("Environment — production/development/test", {
+  default: "production",
+  validate: isEnvName,
+});
+const HOST = await ask("Bind host — 127.0.0.1 for local only, 0.0.0.0 for all interfaces", {
+  default: "127.0.0.1",
+});
+const PORT = await ask("Bind port — TCP port for HTTP", {
+  default: "8787",
+  validate: isPort,
+});
+const DATABASE_PATH = await ask("Database path — encrypted SQLite file", {
+  default: "./data/postern.db",
+});
 
 stdout.write("\n[2/5] Encryption keys\n");
+stdout.write("  Auto-generated 32-byte secrets for encryption at rest and HMAC lookups.\n");
 const ENC_KEY = takeOrGenerate("ENC_KEY");
 const LOOKUP_KEY = takeOrGenerate("LOOKUP_KEY");
 if (preserved.includes("ENC_KEY")) {
@@ -152,40 +164,54 @@ if (preserved.includes("LOOKUP_KEY")) {
 }
 
 stdout.write("\n[3/5] SimpleLogin\n");
-const SL_API_KEY = await askSecret("API key (no echo)", { validate: minLen(10) });
-const OWNER_DOMAIN = await ask("Owner domain (e.g. example.com)", { validate: isDomain });
+stdout.write("  API credentials for the alias provider.\n");
+const SL_API_KEY = await askSecret(
+  "API key — from SimpleLogin > Settings > API Keys (no echo)",
+  { validate: minLen(10) },
+);
+const OWNER_DOMAIN = await ask(
+  "Owner domain — custom domain registered with SimpleLogin (e.g. example.com)",
+  { validate: isDomain },
+);
 
 stdout.write("\n[4/5] Proton SMTP\n");
-const SMTP_USER = await ask("SMTP user (Proton email)", { validate: isEmail });
-const SMTP_PASS = await askSecret("SMTP password (Proton SMTP token, no echo)", {
-  validate: minLen(1),
-});
-const OWNER_EMAIL = await ask("Reply-To owner email (blank = same as SMTP user)", {
-  default: "",
-  validate: isOptionalEmail,
-});
+stdout.write("  Outbound mail credentials for sending visitor messages.\n");
+const SMTP_USER = await ask(
+  "SMTP user — your Proton email address (used as From:)",
+  { validate: isEmail },
+);
+const SMTP_PASS = await askSecret(
+  "SMTP password — Proton SMTP token from Settings > IMAP/SMTP, NOT login password (no echo)",
+  { validate: minLen(1) },
+);
+const OWNER_EMAIL = await ask(
+  "Reply-To owner email — where alias replies forward (blank = same as SMTP user)",
+  { default: "", validate: isOptionalEmail },
+);
 
 stdout.write("\n[5/5] Cloudflare Turnstile\n");
+stdout.write("  Bot protection for the public contact form.\n");
 const turnstileRequired = NODE_ENV === "production";
 const TURNSTILE_SECRET = await askSecret(
-  `Turnstile secret${turnstileRequired ? " (required in production, no echo)" : " (blank to skip in dev, no echo)"}`,
+  `Turnstile secret — from Cloudflare Turnstile widget config (NOT the site key)${turnstileRequired ? " — required in production, no echo" : " — blank to skip in dev, no echo"}`,
   { validate: turnstileRequired ? minLen(1) : undefined },
 );
 const ALLOWED_ORIGINS = await ask(
-  "Allowed origins (comma-separated, blank = same-origin only)",
+  "Allowed origins — comma-separated domains that may POST the form (blank = same-origin only)",
   { default: "" },
 );
 
 stdout.write("\n[+] Admin UI (optional)\n");
+stdout.write("  Optional /admin login for viewing logs and managing aliases.\n");
 const enableAdmin = await askYesNo("Enable admin UI?", false);
 let ADMIN_PASSWORD_HASH = "";
 let ADMIN_SESSION_SECRET = "";
 let ADMIN_SESSION_TTL_HOURS = "12";
 if (enableAdmin) {
-  const pw = await askSecret("Admin password (min 8 chars, no echo)", {
-    confirm: true,
-    validate: minLen(8),
-  });
+  const pw = await askSecret(
+    "Admin password — used to log into /admin (min 8 chars, no echo)",
+    { confirm: true, validate: minLen(8) },
+  );
   ADMIN_PASSWORD_HASH = hashPasswordForSetup(pw);
   ADMIN_SESSION_SECRET = takeOrGenerate("ADMIN_SESSION_SECRET");
   if (preserved.includes("ADMIN_SESSION_SECRET")) {
@@ -193,11 +219,14 @@ if (enableAdmin) {
   } else {
     stdout.write("  ✓ ADMIN_SESSION_SECRET generated (32 bytes)\n");
   }
-  ADMIN_SESSION_TTL_HOURS = await ask("Session TTL hours (1-168)", {
-    default: "12",
-    validate: (v) =>
-      /^\d+$/.test(v) && +v >= 1 && +v <= 168 ? null : "must be 1-168",
-  });
+  ADMIN_SESSION_TTL_HOURS = await ask(
+    "Session TTL hours — how long /admin stays logged in (1-168)",
+    {
+      default: "12",
+      validate: (v) =>
+        /^\d+$/.test(v) && +v >= 1 && +v <= 168 ? null : "must be 1-168",
+    },
+  );
 }
 
 // ---- assemble env object & validate via loadConfig ----
